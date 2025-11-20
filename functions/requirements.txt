@@ -1,0 +1,9 @@
+# Target runtime: Python 3.13
+# These are minimal version constraints expected to work on Python 3.13.
+# If you get incompatibility errors when installing, try bumping to newer patch
+# releases or run `pip index versions <package>` to see available versions.
+firebase_functions~=0.1.0
+firebase-admin>=6.0.0
+google-cloud-storage>=2.10.0
+python-dotenv>=1.0.0
+functions-framework>=3.0.0
