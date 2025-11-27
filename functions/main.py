@@ -2,12 +2,16 @@ import logging
 import os
 import tempfile
 import time
-import subprocess
+import ffmpeg
 from firebase_functions import storage_fn
 from firebase_functions.options import set_global_options
 from firebase_admin import initialize_app, storage as admin_storage
 from dotenv import load_dotenv
 import requests
+import ffmpeg 
+import static_ffmpeg
+static_ffmpeg.add_paths() 
+
 
 set_global_options(max_instances=10)
 initialize_app()
@@ -27,59 +31,74 @@ VARIANTS = {
 
 logger = logging.getLogger(__name__)
 
-def run_ffmpeg_command_direct(input_file, output_playlist, resolution, bitrate, segment_pattern):
+def run_ffmpeg(input_file, output_playlist, resolution, bitrate, segment_pattern):
     """
-    Chạy lệnh ffmpeg trực tiếp sử dụng subprocess với cài đặt hiệu suất nâng cao
+    Sử dụng thư viện ffmpeg-python để transcode.
+    Code style: Fluent Interface (OOP).
     """
-    cmd = [
-        'ffmpeg',
-        '-hide_banner',     
-        '-loglevel', 'error',
-        '-i', input_file,
-        '-c:v', 'libx264',
-        '-c:a', 'aac',
-        '-preset', 'fast',
-        '-tune', 'zerolatency',
-        '-crf', '28',
-        '-maxrate', bitrate, 
-        '-bufsize', f"{int(bitrate.rstrip('k')) * 2}k",
-        '-s', resolution,
-        '-g', '48', 
-        '-keyint_min', '48',
-        '-sc_threshold', '0',
-        '-f', 'hls',
-        '-hls_time', '6',
-        '-hls_list_size', '0',
-        '-hls_segment_filename', segment_pattern,
-        '-hls_flags', 'independent_segments', 
-        '-start_number', '0',
-        '-threads', '2',
-        '-y',
-        output_playlist
-    ]
-    
     if not os.path.exists(input_file):
         logger.error(f"[CRITICAL] Tệp đầu vào không tồn tại: {input_file}")
         return False
     
-    file_size = os.path.getsize(input_file)
-    timeout_seconds = max(300, min(1800, file_size // (1024 * 1024) * 6))
-
     try:
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            timeout=timeout_seconds,
-            env=dict(os.environ, **{'FFREPORT': 'file=/dev/null:level=8'})
+        # 1. Xử lý bitrate (chuyển "1500k" -> 1500000 -> bufsize "3000k")
+        try:
+            bitrate_val = int(bitrate.lower().replace('k', ''))
+            bufsize = f"{bitrate_val * 2}k"
+        except ValueError:
+            bufsize = "2000k"
+
+        # 2. Khởi tạo Input
+        stream = ffmpeg.input(input_file)
+
+        # 3. Cấu hình Output với các tham số HLS
+        stream = ffmpeg.output(
+            stream, 
+            output_playlist,
+            
+            # Video/Audio Codec
+            vcodec='libx264',
+            acodec='aac',
+            
+            # Performance & Quality
+            preset='fast',
+            tune='zerolatency',
+            crf=28,
+            maxrate=bitrate,
+            bufsize=bufsize,
+            
+            # Resolution & GOP
+            s=resolution,
+            g=48,
+            keyint_min=48,
+            sc_threshold=0,
+            
+            # HLS Specific Options
+            format='hls',
+            hls_time=6,
+            hls_list_size=0,
+            hls_segment_filename=segment_pattern,
+            hls_flags='independent_segments',
+            start_number=0,
+            threads=2,
+            y=None
         )
+
+        logger.info(f"Đang xử lý {resolution} với ffmpeg-python...")
+        ffmpeg.run(stream, capture_stdout=True, capture_stderr=True)
         
-        if result.returncode == 0:
-            return True
-        else:
-            return False
+        return True
+
+    except ffmpeg.Error as e:
+        # Thư viện này ném ra lỗi ffmpeg.Error rất chi tiết
+        logger.error(f"[FFMPEG ERROR] Lỗi khi transcode {resolution}")
+        # Lấy log lỗi chi tiết từ FFmpeg (stderr)
+        error_log = e.stderr.decode('utf8') if e.stderr else "No stderr details"
+        logger.error(f"Chi tiết: {error_log}")
+        return False
+        
     except Exception as e:
-        logger.error(f"[UNEXPECTED] Lỗi FFmpeg không mong đợi ({type(e).__name__}): {e}")
+        logger.error(f"[UNEXPECTED] Lỗi không mong đợi: {e}")
         return False
     
 @storage_fn.on_object_finalized()
@@ -125,7 +144,7 @@ def transcoding_to_hsl_video_on_object_finalized(event: storage_fn.CloudEvent[st
             
             try:
                 segment_pattern = os.path.join(variant_dir, 'segment_%03d.ts')
-                ffmpeg_success = run_ffmpeg_command_direct(
+                ffmpeg_success = run_ffmpeg(
                     local_file, 
                     hls_playlist, 
                     opts["resolution"], 
